@@ -4,19 +4,12 @@ import sqlite3
 from datetime import datetime
 import os
 import requests
-import asyncio
-from telethon import TelegramClient
-from telethon.sessions import StringSession
 
 TOKEN = os.environ.get("BOT_TOKEN")
 CRYPTO_TOKEN = os.environ.get("CRYPTO_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
-
 CRYPTO_API = "https://pay.crypt.bot/api"
-
-API_ID = 37051494
-API_HASH = "182f60c3fabd0535800bb4c0c37ab1d8"
 
 # ================= БАЗА ДАННЫХ =================
 def init_db():
@@ -38,8 +31,7 @@ def init_db():
             phone TEXT UNIQUE,
             country TEXT,
             price REAL,
-            status TEXT DEFAULT 'available',
-            session_string TEXT
+            status TEXT DEFAULT 'available'
         )
     ''')
     conn.commit()
@@ -72,22 +64,6 @@ def update_balance(user_id, amount):
     conn.commit()
     conn.close()
 
-def add_account(phone, country, price, session_string):
-    conn = sqlite3.connect('users.db')
-    cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO accounts (phone, country, price, session_string, status) VALUES (?, ?, ?, ?, 'available')",
-                (phone, country, price, session_string))
-    conn.commit()
-    conn.close()
-
-def get_available_accounts():
-    conn = sqlite3.connect('users.db')
-    cur = conn.cursor()
-    cur.execute("SELECT id, phone, country, price FROM accounts WHERE status = 'available'")
-    accounts = cur.fetchall()
-    conn.close()
-    return accounts
-
 # ================= КЛАВИАТУРЫ =================
 def get_main_markup():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -103,12 +79,65 @@ def start(message):
         "👋 Приветствую тебя в магазине аккаунтов <b>Accazon</b>.\n\nПо вопросам писать — @m_muhammad_o8",
         parse_mode='HTML', reply_markup=get_main_markup())
 
-# ================= ДОБАВЛЕНИЕ АККАУНТА =================
+# ================= ПРОФИЛЬ =================
+@bot.message_handler(func=lambda m: m.text == "👤 Профиль")
+def profile(message):
+    user = get_user(message.from_user.id)
+    if not user:
+        return bot.send_message(message.chat.id, "Нажми /start")
+    
+    text = f"""👤 <b>Ваш профиль</b>
+
+💰 Баланс: <b>{user[2]:.2f} USD</b>
+🛒 Куплено: <b>{user[4]} шт.</b>
+💸 Потрачено: <b>{user[3]:.2f} USD</b>
+📅 Дата регистрации: <b>{user[5]}</b>"""
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("💰 Пополнить баланс", callback_data="topup"))
+    bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+# ================= ПОПОЛНЕНИЕ =================
+@bot.callback_query_handler(func=lambda call: call.data == "topup")
+def topup(call):
+    bot.send_message(call.message.chat.id, "💵 Введите сумму пополнения в USD (минимум 1):")
+    bot.register_next_step_handler_by_chat_id(call.message.chat.id, get_amount)
+
+def get_amount(message):
+    try:
+        amount = float(message.text.replace(',', '.').strip())
+        if amount < 1:
+            return bot.send_message(message.chat.id, "❌ Минимум 1 USD")
+
+        headers = {"Crypto-Pay-API-Token": CRYPTO_TOKEN}
+        data = {"asset": "USDT", "amount": str(amount), "description": "Пополнение Accazon", "expires_in": 3600}
+        r = requests.post(f"{CRYPTO_API}/createInvoice", json=data, headers=headers)
+        result = r.json()
+        
+        if not result.get("ok"):
+            return bot.send_message(message.chat.id, "❌ Ошибка создания счёта.")
+
+        invoice = result["result"]
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("💳 Оплатить", url=invoice["pay_url"]))
+        markup.add(types.InlineKeyboardButton("✅ Я оплатил", callback_data=f"check_{invoice['invoice_id']}"))
+
+        bot.send_message(message.chat.id, f"🧾 Счёт на {amount:.2f} USDT\n\nНажми «Оплатить», потом «Я оплатил»", reply_markup=markup)
+    except:
+        bot.send_message(message.chat.id, "❌ Введите корректную сумму.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_"))
+def check_payment(call):
+    bot.answer_callback_query(call.id, "✅ Баланс пополнен!")
+    bot.send_message(call.message.chat.id, "✅ Баланс успешно пополнен!")
+
+# ================= ДОБАВЛЕНИЕ ТОВАРА =================
 @bot.message_handler(commands=['add_number'])
 def add_number(message):
     if message.from_user.id != 5703356053:
         return bot.send_message(message.chat.id, "⛔ Нет доступа")
-    msg = bot.send_message(message.chat.id, "🌍 Укажи страну:")
+    
+    msg = bot.send_message(message.chat.id, "🌍 Укажи страну аккаунта:")
     bot.register_next_step_handler(msg, process_country)
 
 def process_country(message):
@@ -119,60 +148,50 @@ def process_country(message):
 def process_price(message, country):
     try:
         price = float(message.text.strip())
-        msg = bot.send_message(message.chat.id, "📱 Укажи номер телефона (+...):")
-        bot.register_next_step_handler(msg, lambda m: process_phone(m, country, price))
+        msg = bot.send_message(message.chat.id, "📱 Укажи номер телефона (+xxxxxxxxxx):")
+        bot.register_next_step_handler(msg, lambda m: save_number(m, country, price))
     except:
         bot.send_message(message.chat.id, "❌ Цена должна быть числом.")
 
-def process_phone(message, country, price):
+def save_number(message, country, price):
     phone = message.text.strip()
-    bot.send_message(message.chat.id, f"🔄 Авторизация в {phone}...")
-    asyncio.run(authorize_account(message.chat.id, phone, country, price))
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO accounts (phone, country, price) VALUES (?, ?, ?)",
+                (phone, country, price))
+    conn.commit()
+    conn.close()
+    bot.send_message(message.chat.id, f"✅ Аккаунт {phone} ({country}) добавлен за {price} USD!")
 
-async def authorize_account(chat_id, phone, country, price):
-    try:
-        client = TelegramClient(StringSession(""), API_ID, API_HASH)
-        await client.connect()
-        await client.send_code_request(phone)
-        
-        msg = bot.send_message(chat_id, "🔢 Пришли код из SMS:")
-        # Используем register_next_step_handler
-        bot.register_next_step_handler(msg, lambda m: finish_authorization(m, client, phone, country, price))
-    except Exception as e:
-        bot.send_message(chat_id, f"❌ Ошибка: {str(e)}")
-
-def finish_authorization(message, client, phone, country, price):
-    try:
-        code = message.text.strip()
-        await client.sign_in(phone, code)   # await здесь не сработает в sync функции
-        session_string = client.session.save()
-        add_account(phone, country, price, session_string)
-        bot.send_message(message.chat.id, f"✅ Аккаунт {phone} успешно добавлен!")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка входа: {str(e)}")
-
-# ================= КНОПКИ =================
-@bot.message_handler(func=lambda m: m.text == "👤 Профиль")
-def profile(message):
-    user = get_user(message.from_user.id)
-    if not user:
-        return bot.send_message(message.chat.id, "Нажми /start")
-    text = f"""👤 <b>Профиль</b>
-
-💰 Баланс: {user[2]:.2f} USD
-🛒 Куплено: {user[4]} шт.
-💸 Потрачено: {user[3]:.2f} USD"""
-    bot.send_message(message.chat.id, text, parse_mode='HTML')
-
+# ================= КУПИТЬ =================
 @bot.message_handler(func=lambda m: m.text == "🛒 Купить")
 def buy(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📱 Аккаунты Telegram", callback_data="category_tg"))
-    bot.send_message(message.chat.id, "Выберите категорию:", reply_markup=markup)
+    bot.send_message(message.chat.id, "🛒 Выберите категорию:", reply_markup=markup)
 
+@bot.callback_query_handler(func=lambda call: call.data == "category_tg")
+def show_accounts(call):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, phone, country, price FROM accounts WHERE status = 'available'")
+    accounts = cur.fetchall()
+    conn.close()
+    
+    if not accounts:
+        return bot.send_message(call.message.chat.id, "❌ Нет доступных аккаунтов.")
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for acc in accounts:
+        acc_id, phone, country, price = acc
+        markup.add(types.InlineKeyboardButton(f"{country} — {price} USD", callback_data=f"buy_{acc_id}"))
+    
+    bot.send_message(call.message.chat.id, "📱 Доступные аккаунты:", reply_markup=markup)
+
+# ================= ТЕХПОДДЕРЖКА =================
 @bot.message_handler(func=lambda m: m.text == "🛠 Техподдержка")
 def support(message):
-    bot.send_message(message.chat.id, "🛠 По всем вопросам: @m_muhammad_o8")
+    bot.send_message(message.chat.id, "🛠 При проблемах пишите @m_muhammad_o8")
 
 # ================= ЗАПУСК =================
 if __name__ == "__main__":
