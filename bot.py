@@ -20,12 +20,33 @@ OWNER_ID = 5703356053
 ADMIN_ID = 8492482404
 ADMIN_USERNAME = "accazonadmin"
 REVIEW_CHAT_ID = -1003887182798
+LOG_CHAT_ID = -5083005850
 
 def is_owner(user_id):
     return user_id == OWNER_ID
 
 def is_admin(user_id, username):
     return user_id == OWNER_ID or user_id == ADMIN_ID or (username == ADMIN_USERNAME if username else False)
+
+def get_full_name(user):
+    name = user.first_name or ""
+    if user.last_name:
+        name += f" {user.last_name}"
+    return name.strip() or "Без имени"
+
+def user_info(user):
+    name = get_full_name(user)
+    username = f"@{user.username}" if user.username else "без username"
+    return f"<b>{name}</b> ({username}, ID: {user.id})"
+
+def now():
+    return datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+
+def log(text):
+    try:
+        bot.send_message(LOG_CHAT_ID, text, parse_mode='HTML')
+    except Exception as e:
+        print(f"Ошибка логирования: {e}")
 
 # ================= БАЗА ДАННЫХ =================
 DB_PATH = '/app/users.db'
@@ -239,19 +260,19 @@ def main_markup():
     m.row("🛠 Техподдержка")
     return m
 
-def get_full_name(user):
-    name = user.first_name or ""
-    if user.last_name:
-        name += f" {user.last_name}"
-    return name.strip() or "Без имени"
-
 # ================= СТАРТ =================
 @bot.message_handler(commands=['start'])
 def start(message):
+    user = get_user(message.from_user.id)
+    is_new = user is None
     add_new_user(message.from_user.id, message.from_user.username)
     bot.send_message(message.chat.id,
         "👋 Приветствую тебя в магазине аккаунтов <b>Accazon</b>.\n\nПо вопросам писать — @m_muhammad_o8",
         parse_mode='HTML', reply_markup=main_markup())
+    if is_new:
+        log(f"👤 <b>Новый пользователь</b>\n{user_info(message.from_user)}\n🕐 {now()}")
+    else:
+        log(f"▶️ <b>Пользователь запустил бота</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 # ================= ПРОФИЛЬ =================
 @bot.message_handler(commands=['profile'])
@@ -270,6 +291,7 @@ def profile(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("💰 Пополнить баланс", callback_data="topup"))
     bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+    log(f"👤 <b>Открыл профиль</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 # ================= КУПИТЬ =================
 @bot.message_handler(commands=['buy'])
@@ -278,6 +300,7 @@ def buy(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📱 Аккаунты Telegram", callback_data="cat_tg"))
     bot.send_message(message.chat.id, "🛒 Выберите категорию товаров:", reply_markup=markup)
+    log(f"🛒 <b>Открыл магазин</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 @bot.callback_query_handler(func=lambda c: c.data == "cat_tg")
 def show_tg(call):
@@ -291,6 +314,7 @@ def show_tg(call):
     bot.edit_message_text("📱 <b>Аккаунты Telegram</b>\n\nВыберите страну:",
                           call.message.chat.id, call.message.message_id,
                           parse_mode='HTML', reply_markup=markup)
+    log(f"📱 <b>Открыл список товаров</b>\n{user_info(call.from_user)}\n🕐 {now()}")
 
 @bot.callback_query_handler(func=lambda c: c.data == "back_buy")
 def back_buy(call):
@@ -315,6 +339,7 @@ def show_product(call):
     markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="cat_tg"))
     bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
                           parse_mode='HTML', reply_markup=markup)
+    log(f"🔍 <b>Просмотрел товар</b>\n{user_info(call.from_user)}\n🌍 Страна: {p[1]} — {p[2]:.2f}$\n🕐 {now()}")
 
 # ================= ЗАКАЗ =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("order_"))
@@ -333,6 +358,8 @@ def make_order(call):
             f"💰 Ваш баланс: <b>{balance:.2f}$</b>\n"
             f"💸 Цена товара: <b>{p[2]:.2f}$</b>",
             parse_mode='HTML', reply_markup=markup)
+        log(f"❌ <b>Недостаточно средств</b>\n{user_info(call.from_user)}\n"
+            f"💰 Баланс: {balance:.2f}$ | Цена: {p[2]:.2f}$\n🕐 {now()}")
         return bot.answer_callback_query(call.id)
 
     full_name = get_full_name(call.from_user)
@@ -353,8 +380,11 @@ def make_order(call):
         f"🌍 Страна: <b>{p[1]}</b>\n"
         f"💰 Цена: <b>{p[2]:.2f}$</b>\n"
         f"👤 Покупатель: @{username}\n"
-        f"🕐 Время: {datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')}",
+        f"🕐 Время: {now()}",
         parse_mode='HTML', reply_markup=markup)
+
+    log(f"📦 <b>Новый заказ #{order_num}</b>\n{user_info(call.from_user)}\n"
+        f"🌍 Страна: {p[1]} | 💰 Цена: {p[2]:.2f}$\n🕐 {now()}")
     bot.answer_callback_query(call.id)
 
 # ================= ВЫПОЛНЕНИЕ =================
@@ -378,6 +408,9 @@ def done_order(call):
         parse_mode='HTML', reply_markup=markup)
     bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
     bot.answer_callback_query(call.id, "✅ Заказ выполнен!")
+    log(f"✅ <b>Заказ #{order[1]} выполнен</b>\n"
+        f"👤 Покупатель: @{order[6]}\n"
+        f"🌍 Страна: {order[4]} | 💰 Цена: {order[5]:.2f}$\n🕐 {now()}")
 
 # ================= ОТЗЫВ =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("review_"))
@@ -407,8 +440,7 @@ def ask_review_text(call):
 
 def ask_review_photo(message, order_id, stars, stars_text):
     review_text = message.text
-    bot.send_message(message.chat.id,
-        "📸 Отправьте скриншот/фото где виден выполненный заказ:")
+    bot.send_message(message.chat.id, "📸 Отправьте скриншот/фото где виден выполненный заказ:")
     bot.register_next_step_handler_by_chat_id(message.chat.id,
         lambda m: send_review(m, order_id, stars, stars_text, review_text))
 
@@ -433,13 +465,16 @@ def send_review(message, order_id, stars, stars_text, review_text):
                     f"⭐ Оценка: {stars_text} ({stars}/5)\n"
                     f"💬 Отзыв: {review_text}")
 
-    bot.send_message(message.chat.id, "✅ <b>Спасибо за отзыв!</b>", parse_mode='HTML',
-                     reply_markup=main_markup())
+    bot.send_message(message.chat.id, "✅ <b>Спасибо за отзыв!</b>",
+                     parse_mode='HTML', reply_markup=main_markup())
     bot.send_photo(OWNER_ID, photo_id, caption=caption_owner, parse_mode='HTML')
     try:
         bot.send_photo(REVIEW_CHAT_ID, photo_id, caption=caption_chat, parse_mode='HTML')
     except Exception as e:
         print(f"Ошибка отправки в чат отзывов: {e}")
+
+    log(f"📝 <b>Новый отзыв на заказ #{order_id}</b>\n{user_info(message.from_user)}\n"
+        f"⭐ Оценка: {stars}/5\n💬 {review_text}\n🕐 {now()}")
 
 # ================= ADD_NUMBER =================
 @bot.message_handler(commands=['add_number'])
@@ -448,6 +483,7 @@ def add_number(message):
         return
     bot.send_message(message.chat.id, "🌍 Введите страну товара (например: США):")
     bot.register_next_step_handler(message, get_country)
+    log(f"➕ <b>Добавление товара начато</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 def get_country(message):
     country = message.text.strip()
@@ -476,6 +512,8 @@ def get_quantity(message, country, price, description):
             f"🌍 Страна: {country}\n💰 Цена: {price}$\n"
             f"📝 Описание: {description}\n📦 Количество: {quantity} шт.",
             parse_mode='HTML')
+        log(f"✅ <b>Товар добавлен</b>\n{user_info(message.from_user)}\n"
+            f"🌍 {country} | 💰 {price}$ | 📦 {quantity} шт.\n🕐 {now()}")
     except:
         bot.send_message(message.chat.id, "❌ Введите количество цифрами. Попробуйте /add_number снова.")
 
@@ -492,6 +530,8 @@ def add_balance_cmd(message):
         bot.send_message(message.chat.id,
             f"✅ Пользователю <b>{target_id}</b> зачислено <b>{amount:.2f} USD</b>",
             parse_mode='HTML')
+        log(f"💸 <b>Ручное пополнение баланса</b>\nВладелец → ID: {target_id}\n"
+            f"💰 Сумма: {amount:.2f} USD\n🕐 {now()}")
     except:
         bot.send_message(message.chat.id,
             "❌ Использование:\n/add_balance 10 — себе\n/add_balance 10 123456789 — другому")
@@ -503,6 +543,7 @@ def null_zakaz(message):
         return
     reset_order_counter()
     bot.send_message(message.chat.id, "✅ Счётчик заказов обнулён. Следующий заказ будет #1.")
+    log(f"🔄 <b>Счётчик заказов обнулён</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 # ================= ПОДДЕРЖКА =================
 @bot.message_handler(commands=['help'])
@@ -510,12 +551,14 @@ def null_zakaz(message):
 def support(message):
     bot.send_message(message.chat.id, "🛠 При проблемах пишите @m_muhammad_o8",
                      reply_markup=main_markup())
+    log(f"🛠 <b>Обратился в поддержку</b>\n{user_info(message.from_user)}\n🕐 {now()}")
 
 # ================= ПОПОЛНЕНИЕ =================
 @bot.callback_query_handler(func=lambda c: c.data == "topup")
 def topup(call):
     bot.send_message(call.message.chat.id, "💵 Введите сумму пополнения в USD (минимум 0.5):")
     bot.register_next_step_handler_by_chat_id(call.message.chat.id, get_amount)
+    log(f"💰 <b>Начал пополнение баланса</b>\n{user_info(call.from_user)}\n🕐 {now()}")
 
 def get_amount(message):
     try:
@@ -535,6 +578,8 @@ def get_amount(message):
             f"⏳ Счёт действителен 1 час\n\n"
             f"Нажми <b>«Оплатить»</b>, затем вернись и нажми <b>«Я оплатил»</b>",
             parse_mode='HTML', reply_markup=markup)
+        log(f"🧾 <b>Создан счёт на оплату</b>\n{user_info(message.from_user)}\n"
+            f"💰 Сумма: {amount:.2f} USDT\n🕐 {now()}")
     except Exception:
         bot.send_message(message.chat.id, "❌ Введите сумму цифрами (например: 10)")
 
@@ -557,6 +602,8 @@ def check_payment(call):
         bot.send_message(call.message.chat.id,
             f"✅ <b>Баланс пополнен!</b>\n\n💰 Зачислено: <b>{amount:.2f} USD</b>",
             parse_mode='HTML', reply_markup=main_markup())
+        log(f"✅ <b>Баланс пополнен</b>\n{user_info(call.from_user)}\n"
+            f"💰 Сумма: {amount:.2f} USD\n🕐 {now()}")
     else:
         bot.answer_callback_query(call.id, "⏳ Оплата ещё не поступила. Попробуйте через минуту.")
 
