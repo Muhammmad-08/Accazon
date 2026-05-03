@@ -7,12 +7,13 @@ import requests
 import asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError
 
 TOKEN = os.environ.get("BOT_TOKEN")
 CRYPTO_TOKEN = os.environ.get("CRYPTO_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
+
+CRYPTO_API = "https://pay.crypt.bot/api"
 
 # ================= TELETHON =================
 API_ID = 37051494
@@ -22,7 +23,18 @@ API_HASH = "182f60c3fabd0535800bb4c0c37ab1d8"
 def init_db():
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    cur.execute('''CREATE TABLE IF NOT EXISTS users (...)''')  # твоя таблица users
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            balance REAL DEFAULT 0.0,
+            total_spent REAL DEFAULT 0.0,
+            purchases INTEGER DEFAULT 0,
+            reg_date TEXT
+        )
+    ''')
+    
     cur.execute('''
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,99 +45,181 @@ def init_db():
             session_string TEXT
         )
     ''')
+    
     conn.commit()
     conn.close()
 
+def get_user(user_id):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+def add_new_user(user_id, username):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    reg_date = datetime.now().strftime("%d.%m.%Y")
+    cur.execute("INSERT OR IGNORE INTO users (user_id, username, reg_date) VALUES (?, ?, ?)",
+                (user_id, username, reg_date))
+    conn.commit()
+    conn.close()
+
+def update_balance(user_id, amount):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET balance = balance + ?, total_spent = total_spent - ? WHERE user_id = ?", 
+                (amount, amount, user_id))
+    conn.commit()
+    conn.close()
+
+def add_account(phone, country, price, session_string):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO accounts (phone, country, price, session_string, status) VALUES (?, ?, ?, ?, 'available')",
+                (phone, country, price, session_string))
+    conn.commit()
+    conn.close()
+
+def get_available_accounts():
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("SELECT id, phone, country, price FROM accounts WHERE status = 'available'")
+    accounts = cur.fetchall()
+    conn.close()
+    return accounts
+
 init_db()
 
-# ================= КОМАНДА ДОБАВЛЕНИЯ =================
+# ================= МЕНЮ =================
+def get_main_markup():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("👤 Профиль", "🛒 Купить")
+    markup.row("🛠 Техподдержка")
+    return markup
+
+# ================= КОМАНДЫ =================
+@bot.message_handler(commands=['start'])
+def start(message):
+    add_new_user(message.from_user.id, message.from_user.username)
+    bot.send_message(
+        message.chat.id,
+        "👋 Приветствую тебя в магазине аккаунтов <b>Accazon</b>.\n\nПо вопросам писать — @m_muhammad_o8",
+        parse_mode='HTML',
+        reply_markup=get_main_markup()
+    )
+
 @bot.message_handler(commands=['add_number'])
 def add_number(message):
     if message.from_user.id != 5703356053:
         return bot.send_message(message.chat.id, "⛔ Нет доступа")
     
-    msg = bot.send_message(message.chat.id, "🌍 Страна аккаунта?")
+    msg = bot.send_message(message.chat.id, "🌍 Укажи страну:")
     bot.register_next_step_handler(msg, process_country)
 
 def process_country(message):
     country = message.text.strip()
-    msg = bot.send_message(message.chat.id, "💰 Цена в USD?")
+    msg = bot.send_message(message.chat.id, "💰 Укажи цену в USD:")
     bot.register_next_step_handler(msg, lambda m: process_price(m, country))
 
 def process_price(message, country):
     try:
         price = float(message.text.strip())
-        msg = bot.send_message(message.chat.id, "📱 Номер телефона (+xxxxxxxxxx)?")
+        msg = bot.send_message(message.chat.id, "📱 Укажи номер телефона (+...):")
         bot.register_next_step_handler(msg, lambda m: process_phone(m, country, price))
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка в цене.")
+        bot.send_message(message.chat.id, "❌ Цена должна быть числом.")
 
 def process_phone(message, country, price):
     phone = message.text.strip()
-    bot.send_message(message.chat.id, f"⏳ Пытаюсь зайти в аккаунт {phone}...")
+    bot.send_message(message.chat.id, f"🔄 Пытаюсь авторизоваться в {phone}...")
+    asyncio.run(authorize_and_save(message.chat.id, phone, country, price))
 
-    asyncio.run(authorize_account(message.chat.id, phone, country, price))
-
-async def authorize_account(chat_id, phone, country, price):
+async def authorize_and_save(chat_id, phone, country, price):
     try:
         client = TelegramClient(StringSession(""), API_ID, API_HASH)
         await client.connect()
         
         await client.send_code_request(phone)
-        msg = bot.send_message(chat_id, "🔢 Отправь код, который пришёл в SMS:")
+        msg = bot.send_message(chat_id, "🔢 Пришли код из SMS:")
         
-        # Ожидаем код
         code_msg = await bot.wait_for_message(chat_id=chat_id, timeout=300)
         code = code_msg.text.strip()
         
         await client.sign_in(phone, code)
-        
         session_string = client.session.save()
         
-        # Сохраняем в БД
-        conn = sqlite3.connect('users.db')
-        cur = conn.cursor()
-        cur.execute("INSERT INTO accounts (phone, country, price, session_string, status) VALUES (?, ?, ?, ?, 'available')",
-                    (phone, country, price, session_string))
-        conn.commit()
-        conn.close()
-        
+        add_account(phone, country, price, session_string)
         bot.send_message(chat_id, f"✅ Аккаунт {phone} успешно добавлен и авторизован!")
         
     except Exception as e:
-        bot.send_message(chat_id, f"❌ Ошибка: {str(e)}")
+        bot.send_message(chat_id, f"❌ Ошибка авторизации: {str(e)}")
 
 # ================= ПОКУПКА =================
+@bot.message_handler(commands=['buy'])
+@bot.message_handler(func=lambda m: m.text == "🛒 Купить")
+def buy(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("📱 Аккаунты Telegram", callback_data="category_tg"))
+    bot.send_message(message.chat.id, "🛒 Выберите категорию:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "category_tg")
+def show_accounts(call):
+    accounts = get_available_accounts()
+    if not accounts:
+        return bot.send_message(call.message.chat.id, "❌ Нет доступных аккаунтов.")
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for acc in accounts:
+        acc_id, phone, country, price = acc
+        markup.add(types.InlineKeyboardButton(f"{country} — {price} USD", callback_data=f"buy_acc_{acc_id}"))
+    
+    bot.send_message(call.message.chat.id, "📱 Доступные аккаунты:", reply_markup=markup)
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("buy_acc_"))
-async def buy_account(call):
+def confirm_buy(call):
     acc_id = int(call.data.split("_")[2])
-    user = get_user(call.from_user.id)
     
     conn = sqlite3.connect('users.db')
     cur = conn.cursor()
-    cur.execute("SELECT phone, country, price, session_string FROM accounts WHERE id = ?", (acc_id,))
+    cur.execute("SELECT phone, country, price FROM accounts WHERE id = ?", (acc_id,))
     acc = cur.fetchone()
     conn.close()
     
-    if not acc or user[2] < acc[2]:
-        return bot.send_message(call.message.chat.id, "❌ Недостаточно средств или аккаунт не найден.")
+    if not acc:
+        return bot.send_message(call.message.chat.id, "Аккаунт не найден.")
     
-    phone, country, price, session_string = acc
+    phone, country, price = acc
+    user = get_user(call.from_user.id)
     
-    # Списание денег
+    if user[2] < price:
+        return bot.send_message(call.message.chat.id, "❌ Недостаточно средств.")
+    
+    # Списание
     update_balance(call.from_user.id, -price)
     
-    bot.send_message(call.message.chat.id, f"✅ Покупка аккаунта {country} прошла успешно!\n\n📱 Номер: `{phone}`\n\nОжидайте код...", parse_mode='Markdown')
+    bot.send_message(call.message.chat.id, f"✅ Вы купили аккаунт {country}\nНомер: `{phone}`\n\nОжидайте код входа...", parse_mode='Markdown')
     
-    # Попытка получить новый код входа
-    asyncio.run(send_login_code(call.from_user.id, session_string, phone))
+    # Отправка кода
+    asyncio.run(send_code(call.from_user.id, acc_id))
 
-async def send_login_code(user_id, session_string, phone):
+async def send_code(user_id, acc_id):
+    conn = sqlite3.connect('users.db')
+    cur = conn.cursor()
+    cur.execute("SELECT session_string, phone FROM accounts WHERE id = ?", (acc_id,))
+    row = cur.fetchone()
+    conn.close()
+    
+    if not row:
+        return
+    
+    session_string, phone = row
     try:
         client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
         await client.connect()
         await client.send_code_request(phone)
-        bot.send_message(user_id, "🔢 Код отправлен на аккаунт. Он придёт в ближайшее время.")
+        bot.send_message(user_id, "🔢 Код отправлен на аккаунт. Он должен прийти в ближайшее время.")
     except Exception as e:
         bot.send_message(user_id, f"⚠️ Не удалось отправить код: {str(e)}")
 
