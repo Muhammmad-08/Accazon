@@ -25,11 +25,16 @@ def is_owner(user_id):
     return user_id == OWNER_ID
 
 def is_admin(user_id, username):
-    return user_id == OWNER_ID or user_id == ADMIN_ID or username == ADMIN_USERNAME
+    return user_id == OWNER_ID or user_id == ADMIN_ID or (username == ADMIN_USERNAME if username else False)
 
 # ================= БАЗА ДАННЫХ =================
+DB_PATH = '/app/users.db'
+
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
 def init_db():
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
@@ -55,6 +60,7 @@ def init_db():
     )''')
     cur.execute('''CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_num INTEGER,
         user_id INTEGER,
         product_id INTEGER,
         country TEXT,
@@ -64,11 +70,33 @@ def init_db():
         status TEXT DEFAULT 'pending',
         created_at TEXT
     )''')
+    cur.execute('''CREATE TABLE IF NOT EXISTS order_counter (
+        id INTEGER PRIMARY KEY,
+        value INTEGER DEFAULT 0
+    )''')
+    cur.execute("INSERT OR IGNORE INTO order_counter (id, value) VALUES (1, 0)")
+    conn.commit()
+    conn.close()
+
+def get_next_order_number():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE order_counter SET value = value + 1 WHERE id = 1")
+    conn.commit()
+    cur.execute("SELECT value FROM order_counter WHERE id = 1")
+    num = cur.fetchone()[0]
+    conn.close()
+    return num
+
+def reset_order_counter():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE order_counter SET value = 0 WHERE id = 1")
     conn.commit()
     conn.close()
 
 def get_user(user_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
@@ -76,7 +104,7 @@ def get_user(user_id):
     return row
 
 def add_new_user(user_id, username):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     reg_date = datetime.now().strftime("%d.%m.%Y")
     cur.execute("INSERT OR IGNORE INTO users (user_id, username, reg_date) VALUES (?, ?, ?)",
@@ -85,14 +113,14 @@ def add_new_user(user_id, username):
     conn.close()
 
 def update_balance(user_id, amount):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
     conn.commit()
     conn.close()
 
 def save_invoice(invoice_id, user_id, amount):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO invoices (invoice_id, user_id, amount) VALUES (?, ?, ?)",
                 (invoice_id, user_id, amount))
@@ -100,7 +128,7 @@ def save_invoice(invoice_id, user_id, amount):
     conn.close()
 
 def get_invoice(invoice_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM invoices WHERE invoice_id = ?", (invoice_id,))
     row = cur.fetchone()
@@ -108,14 +136,14 @@ def get_invoice(invoice_id):
     return row
 
 def mark_invoice_paid(invoice_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE invoices SET status = 'paid' WHERE invoice_id = ?", (invoice_id,))
     conn.commit()
     conn.close()
 
 def get_products():
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM products WHERE quantity > 0")
     rows = cur.fetchall()
@@ -123,7 +151,7 @@ def get_products():
     return rows
 
 def get_product(product_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM products WHERE id = ?", (product_id,))
     row = cur.fetchone()
@@ -131,30 +159,30 @@ def get_product(product_id):
     return row
 
 def add_product(country, price, description, quantity):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO products (country, price, description, quantity) VALUES (?, ?, ?, ?)",
                 (country, price, description, quantity))
     conn.commit()
     conn.close()
 
-def create_order(user_id, product_id, country, price, username, full_name):
-    conn = sqlite3.connect('/app/users.db')
+def create_order(order_num, user_id, product_id, country, price, username, full_name):
+    conn = get_conn()
     cur = conn.cursor()
     created_at = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-    cur.execute('''INSERT INTO orders (user_id, product_id, country, price, username, full_name, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
-                (user_id, product_id, country, price, username, full_name, created_at))
+    cur.execute('''INSERT INTO orders (order_num, user_id, product_id, country, price, username, full_name, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (order_num, user_id, product_id, country, price, username, full_name, created_at))
     order_id = cur.lastrowid
     cur.execute("UPDATE products SET quantity = quantity - 1 WHERE id = ?", (product_id,))
-    cur.execute("UPDATE users SET balance = balance - ?, total_spent = total_spent + ?, pending = pending + 1 WHERE user_id = ?",
-                (price, price, user_id))
+    cur.execute('''UPDATE users SET balance = balance - ?, total_spent = total_spent + ?,
+                   pending = pending + 1 WHERE user_id = ?''', (price, price, user_id))
     conn.commit()
     conn.close()
     return order_id
 
 def complete_order(order_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT user_id FROM orders WHERE id = ?", (order_id,))
     row = cur.fetchone()
@@ -169,7 +197,7 @@ def complete_order(order_id):
     return None
 
 def get_order(order_id):
-    conn = sqlite3.connect('/app/users.db')
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
     row = cur.fetchone()
@@ -299,28 +327,32 @@ def make_order(call):
     if not user or user[2] < p[2]:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("💰 Пополнить баланс", callback_data="topup"))
+        balance = user[2] if user else 0
         bot.send_message(call.message.chat.id,
             f"❌ <b>Недостаточно средств!</b>\n\n"
-            f"💰 Ваш баланс: <b>{user[2]:.2f}$</b>\n"
+            f"💰 Ваш баланс: <b>{balance:.2f}$</b>\n"
             f"💸 Цена товара: <b>{p[2]:.2f}$</b>",
             parse_mode='HTML', reply_markup=markup)
         return bot.answer_callback_query(call.id)
 
     full_name = get_full_name(call.from_user)
     username = call.from_user.username or "—"
-    order_id = create_order(call.from_user.id, product_id, p[1], p[2], username, full_name)
+    order_num = get_next_order_number()
+    order_id = create_order(order_num, call.from_user.id, product_id, p[1], p[2], username, full_name)
 
     bot.send_message(call.message.chat.id,
-        f"✅ <b>Заказ #{order_id} оформлен!</b>\n\n⏳ Ожидайте выполнения.",
+        f"✅ <b>Заказ #{order_num} оформлен!</b>\n\n"
+        f"⏳ Ожидайте выполнения.\n"
+        f"👤 Ваш заказ выполнит: @m_muhammad_o8",
         parse_mode='HTML', reply_markup=main_markup())
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✅ Выполнил заказ", callback_data=f"done_{order_id}"))
     bot.send_message(OWNER_ID,
-        f"🔔 <b>Новый заказ #{order_id}</b>\n\n"
+        f"🔔 <b>Новый заказ #{order_num}</b>\n\n"
         f"🌍 Страна: <b>{p[1]}</b>\n"
         f"💰 Цена: <b>{p[2]:.2f}$</b>\n"
-        f"👤 Покупатель: <b>{full_name}</b>\n"
+        f"👤 Покупатель: @{username}\n"
         f"🕐 Время: {datetime.now(timezone.utc).strftime('%d.%m.%Y %H:%M UTC')}",
         parse_mode='HTML', reply_markup=markup)
     bot.answer_callback_query(call.id)
@@ -334,13 +366,13 @@ def done_order(call):
     order = get_order(order_id)
     if not order:
         return bot.answer_callback_query(call.id, "❌ Заказ не найден")
-    if order[7] == 'completed':
+    if order[8] == 'completed':
         return bot.answer_callback_query(call.id, "✅ Уже выполнен")
     user_id = complete_order(order_id)
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("✍️ Написать отзыв", callback_data=f"review_{order_id}"))
     bot.send_message(user_id,
-        f"✅ <b>Ваш заказ #{order_id} выполнен!</b>\n\n"
+        f"✅ <b>Ваш заказ #{order[1]} выполнен!</b>\n\n"
         f"Спасибо, что выбрали <b>Accazon</b>!\n"
         f"Будем рады вашему отзыву 🙏",
         parse_mode='HTML', reply_markup=markup)
@@ -370,27 +402,46 @@ def ask_review_text(call):
     bot.send_message(call.message.chat.id,
         f"Вы поставили: <b>{stars_text}</b>\n\nНапишите текст отзыва:", parse_mode='HTML')
     bot.register_next_step_handler_by_chat_id(call.message.chat.id,
-        lambda m: send_review(m, order_id, stars, stars_text))
+        lambda m: ask_review_photo(m, order_id, stars, stars_text))
     bot.answer_callback_query(call.id)
 
-def send_review(message, order_id, stars, stars_text):
-    full_name = get_full_name(message.from_user)
+def ask_review_photo(message, order_id, stars, stars_text):
     review_text = message.text
+    bot.send_message(message.chat.id,
+        "📸 Отправьте скриншот/фото где виден выполненный заказ:")
+    bot.register_next_step_handler_by_chat_id(message.chat.id,
+        lambda m: send_review(m, order_id, stars, stars_text, review_text))
 
-    bot.send_message(message.chat.id, "✅ <b>Спасибо за отзыв!</b>", parse_mode='HTML')
+def send_review(message, order_id, stars, stars_text, review_text):
+    if not message.photo:
+        bot.send_message(message.chat.id, "❌ Пожалуйста, отправьте именно фото!")
+        bot.register_next_step_handler_by_chat_id(message.chat.id,
+            lambda m: send_review(m, order_id, stars, stars_text, review_text))
+        return
 
-    text = (f"📝 <b>Новый отзыв — заказ #{order_id}</b>\n\n"
-            f"👤 Покупатель: <b>{full_name}</b>\n"
-            f"⭐ Оценка: {stars_text} ({stars}/5)\n"
-            f"💬 Отзыв: {review_text}")
+    full_name = get_full_name(message.from_user)
+    username = message.from_user.username or "—"
+    photo_id = message.photo[-1].file_id
 
-    bot.send_message(OWNER_ID, text, parse_mode='HTML')
+    caption_owner = (f"📝 <b>Отзыв на заказ #{order_id}</b>\n\n"
+                     f"👤 Покупатель: @{username}\n"
+                     f"⭐ Оценка: {stars_text} ({stars}/5)\n"
+                     f"💬 Отзыв: {review_text}")
+
+    caption_chat = (f"📝 <b>Отзыв на заказ #{order_id}</b>\n\n"
+                    f"👤 Покупатель: <b>{full_name}</b>\n"
+                    f"⭐ Оценка: {stars_text} ({stars}/5)\n"
+                    f"💬 Отзыв: {review_text}")
+
+    bot.send_message(message.chat.id, "✅ <b>Спасибо за отзыв!</b>", parse_mode='HTML',
+                     reply_markup=main_markup())
+    bot.send_photo(OWNER_ID, photo_id, caption=caption_owner, parse_mode='HTML')
     try:
-        bot.send_message(REVIEW_CHAT_ID, text, parse_mode='HTML')
+        bot.send_photo(REVIEW_CHAT_ID, photo_id, caption=caption_chat, parse_mode='HTML')
     except Exception as e:
         print(f"Ошибка отправки в чат отзывов: {e}")
 
-# ================= ADD_NUMBER (ВЛАДЕЛЕЦ + ADMIN) =================
+# ================= ADD_NUMBER =================
 @bot.message_handler(commands=['add_number'])
 def add_number(message):
     if not is_admin(message.from_user.id, message.from_user.username):
@@ -428,7 +479,7 @@ def get_quantity(message, country, price, description):
     except:
         bot.send_message(message.chat.id, "❌ Введите количество цифрами. Попробуйте /add_number снова.")
 
-# ================= ADD_BALANCE (ТОЛЬКО ВЛАДЕЛЕЦ) =================
+# ================= ADD_BALANCE =================
 @bot.message_handler(commands=['add_balance'])
 def add_balance_cmd(message):
     if not is_owner(message.from_user.id):
@@ -436,17 +487,22 @@ def add_balance_cmd(message):
     try:
         parts = message.text.split()
         amount = float(parts[1])
-        if len(parts) == 3:
-            target_id = int(parts[2])
-        else:
-            target_id = OWNER_ID
+        target_id = int(parts[2]) if len(parts) == 3 else OWNER_ID
         update_balance(target_id, amount)
         bot.send_message(message.chat.id,
             f"✅ Пользователю <b>{target_id}</b> зачислено <b>{amount:.2f} USD</b>",
             parse_mode='HTML')
     except:
         bot.send_message(message.chat.id,
-            "❌ Использование:\n/add_balance 10 — себе\n/add_balance 10 123456789 — другому пользователю")
+            "❌ Использование:\n/add_balance 10 — себе\n/add_balance 10 123456789 — другому")
+
+# ================= NULL_ZAKAZ =================
+@bot.message_handler(commands=['null_zakaz'])
+def null_zakaz(message):
+    if not is_owner(message.from_user.id):
+        return
+    reset_order_counter()
+    bot.send_message(message.chat.id, "✅ Счётчик заказов обнулён. Следующий заказ будет #1.")
 
 # ================= ПОДДЕРЖКА =================
 @bot.message_handler(commands=['help'])
